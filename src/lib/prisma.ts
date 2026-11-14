@@ -755,7 +755,17 @@ async function executeRawQuery(
   });
 
   if (schema) {
-    await queryClient.$executeRawUnsafe(`SET search_path TO "${schema}";`);
+    const searchPath = `SET LOCAL search_path TO "${schema.replaceAll('"', '""')}";`;
+
+    if (!process.env.DATABASE_REPLICA_URL) {
+      const [, result] = await client.$transaction([
+        client.$executeRawUnsafe(searchPath),
+        client.$queryRawUnsafe(query, ...params),
+      ]);
+      return result;
+    }
+
+    await queryClient.$executeRawUnsafe(`SET search_path TO "${schema.replaceAll('"', '""')}";`);
   }
 
   return queryClient.$queryRawUnsafe(query, ...params);
@@ -888,7 +898,22 @@ function getClient() {
 
   const schema = getSchema();
 
-  const baseAdapter = new PrismaPg({ connectionString: url }, { schema });
+  const connectionUrl = new URL(url);
+  // Vercel functions share transaction-pooled connections. The build uses DATABASE_URL for migrations.
+  const useSupabaseTransactionPool =
+    process.env.VERCEL === '1' &&
+    !replicaUrl &&
+    connectionUrl.hostname.endsWith('.pooler.supabase.com') &&
+    connectionUrl.port === '5432';
+
+  if (useSupabaseTransactionPool) {
+    connectionUrl.port = '6543';
+  }
+
+  const baseAdapter = new PrismaPg(
+    useSupabaseTransactionPool ? { connectionString: connectionUrl.toString(), max: 3 } : { connectionString: url },
+    { schema },
+  );
 
   const baseClient = new PrismaClient({
     adapter: baseAdapter,
